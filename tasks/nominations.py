@@ -1,3 +1,5 @@
+import json
+import urllib
 import utils
 import os
 import os.path
@@ -16,8 +18,10 @@ def run(options):
         to_fetch = [nomination_id]
     else:
         congress = options.get('congress', utils.current_congress())
-        to_fetch = nomination_ids_for(congress, options)
+        to_fetch = get_nominations_to_process(congress, options)
+
         if not to_fetch:
+            # TODO Find out what the "fast" option is
             if options.get("fast", False):
                 logging.warn("No nominations changed.")
             else:
@@ -29,74 +33,59 @@ def run(options):
             to_fetch = to_fetch[:int(limit)]
 
     logging.warn("Going to fetch %i nominations from congress #%s" % (len(to_fetch), congress))
+    #utils.process_set(to_fetch, nomination_info.fetch_nomination, options)
 
-    saved_nominations = utils.process_set(to_fetch, nomination_info.fetch_nomination, options)
-
-# page through listings for bills of a particular congress
-
-
-def nomination_ids_for(congress, options={}):
+def get_nominations_to_process(congress, options={}):
+    # Return a generator over nomination_ids that need to be processed.
+    # TODO Figure out whether there is a way to do a last modified check like
+    # bills.py does
     nomination_ids = []
+    # TODO
 
-    page = page_for(congress, options)
-    if not page:
-        logging.error("Couldn't download page for %d congress" % congress)
-        return None
+    pages = get_pages(congress, options={})
 
-    # extract matching links
-    doc = html.document_fromstring(page)
-    raw_nomination_ids = doc.xpath('//div[@id="content"]/p[2]/a/text()')
-    nomination_ids = []
+    return pages
 
-    for raw_id in raw_nomination_ids:
-        pieces = raw_id.split(' ')
+def get_pages(congress, options={}):
+    pages = []
 
-        # ignore these
-        if raw_id in ["PDF", "Text", "split into two or more parts"]:
-            pass
-        elif len(pieces) < 2:
-            logging.error("Bad nomination ID detected: %s" % raw_id)
-            return None
-        else:
-            nomination_ids.append(pieces[1])
+    current_page = 1
+    while current_page == 1 or next_page_exists(pages[-1]):
+        # TODO cache false?
+        url = get_page_url(congress, current_page)
+        page_html = utils.download(
+            url,
+            "%s/nominations/pages/page_%s.html" % (congress, current_page),
+            options)
+        pages.append(page_html)
 
-    return utils.uniq(nomination_ids)
+        current_page += 1
 
+    return pages
 
-def page_cache_for(congress):
-    return "%s/nominations/pages/search.html" % congress
+def next_page_exists(page_html):
+    # Given a page's html, return whether there is a subsequent page. Relies on
+    # the pagination navigation element at bottom of results. If the "next"
+    # element is a link, then there is a next page.
+    doc = html.document_fromstring(page_html)
+    next_link = doc.xpath("//*[@id='main']/*[@role='navigation']//a[contains(@class, 'next')]")
 
-# unlike bills.py, we're going to fetch the page instead of producing the URL,
-# since a POST is required.
+    return bool(next_link)
 
-
-def page_for(congress, options):
-    congress = int(congress)
-    postdata = {
-        "database": "nominations",
-        "MaxDocs": '5000',
-        "submit": "SEARCH",
-        "querytype": "phrase",
-        "query": "",
-        "Stemming": "No",
-        "congress": "%d" % congress,
-        "CIVcategory": "on",
-        "LSTcategory": "on",
-        "committee": "",
-        "LBDateSel": "FLD606",
-        "EBSDate": "",
-        "EBEDate": "",
-        "sort": "sh_docid_rc",
+def get_page_url(congress, page=1):
+    # Given a congress and optional page number, return the Congress.gov url
+    # listing nominations
+    #
+    # Example:
+    # https://www.congress.gov/search?q={"source":"nominations","congress":"115"}&pageSort=actionDesc&pageSize=250
+    query = {
+        "q": json.dumps({
+            "source": "nominations",
+            "congress": str(congress)
+        }, separators=(',', ':')),
+        "pageSort": "actionDesc",
+        "pageSize": 250,
+        "page": page
     }
-
-    post_options = {'postdata': postdata}
-    post_options.update(options)
-
-    # unused: never cache search listing
-    cache = page_cache_for(congress)
-
-    page = utils.download("http://thomas.loc.gov/cgi-bin/thomas",
-                          None,
-                          post_options
-                          )
-    return page
+    params = urllib.urlencode(query)
+    return "https://www.congress.gov/search?%s" % params
