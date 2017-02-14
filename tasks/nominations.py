@@ -33,18 +33,32 @@ def run(options):
             to_fetch = to_fetch[:int(limit)]
 
     logging.warn("Going to fetch %i nominations from congress #%s" % (len(to_fetch), congress))
-    #utils.process_set(to_fetch, nomination_info.fetch_nomination, options)
+    utils.process_set(to_fetch, nomination_info.fetch_nomination, options)
 
 def get_nominations_to_process(congress, options={}):
     # Return a generator over nomination_ids that need to be processed.
     # TODO Figure out whether there is a way to do a last modified check like
     # bills.py does
     nomination_ids = []
-    # TODO
-
     pages = get_pages(congress, options={})
+    for page in pages:
+        nomination_ids = nomination_ids + parse_nomination_ids(page)
 
-    return pages
+    return [{"id": x, "congress": congress} for x in nomination_ids]
+
+def parse_nomination_ids(page_html):
+    # Given a page's html, return a list of nomination ids
+    doc = html.document_fromstring(page_html)
+    nominations = doc.xpath("//*[@id='main']/ol[contains(@class, 'basic-search-results-lists')]/li")
+    ids = []
+    for nomination in nominations:
+        # The link text of the heading contains the nomination id
+        links = nomination.cssselect('.result-heading a')
+        if links and len(links) > 0:
+            link = links[0]
+            ids.append(link.text)
+
+    return ids
 
 def get_pages(congress, options={}):
     pages = []

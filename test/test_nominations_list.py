@@ -56,11 +56,7 @@ class NominationsList(unittest.TestCase):
         result = nominations.next_page_exists(html)
         self.assertEqual(expected, result)
 
-
-    #def test_get_nominations_to_process(self):
-        #congress = 114
-        #expected = []
-
-        #result = nominations.get_pages(congress)
-        #self.assertEqual(expected, result)
+    def test_parse_nomination_ids(self):
+        # TODO
+        pass
 
