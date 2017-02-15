@@ -7,7 +7,10 @@ sys.path.append("test")  # allow fixtures.py to be loaded
 
 #tests = unittest.TestLoader().discover("test")
 # TODO reenable all tests
-tests = unittest.TestLoader().loadTestsFromNames(["test_nominations_list"])
+tests = unittest.TestLoader().loadTestsFromNames([
+    "test_nominations_list",
+    "test_utils"
+])
 results = unittest.TextTestRunner().run(tests)
 
 if (len(results.failures) > 0) or (len(results.errors) > 0):

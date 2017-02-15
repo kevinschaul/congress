@@ -150,18 +150,6 @@ def split_vote_id(vote_id):
     # for historical votes before sessions were basically calendar years.
     return re.match("^(h|s)(\d+)-(\d+).(\d\d\d\d|[0-9A-Z])$", vote_id).groups()
 
-# nomination_type (always PN), nomination_number, congress
-#   nomination_number is usually a number, but can be hyphenated, e.g. PN64-01-111
-#   which would produce a nomination_number of "64-01"
-
-
-def split_nomination_id(nomination_id):
-    try:
-        return re.match("^([A-z]{2})([\d-]+)-(\d+)$", nomination_id).groups()
-    except Exception, e:
-        logging.error("Unabled to parse %s" % nomination_id)
-        return (None, None, None)
-
 
 def process_set(to_fetch, fetch_func, options, *extra_args):
     errors = []
@@ -845,3 +833,14 @@ def translate_legislator_id(source_id_type, source_id, dest_id_type):
         return _translate_legislator_id_cache[(source_id_type, source_id)][dest_id_type]
     except KeyError:
         raise UnmatchedIdentifer(source_id_type, source_id, dest_id_type)
+
+def get_numerical_suffix(number):
+    # Return the numerical rank suffic for the given number.
+    # e.g. 101 -> st (101st)
+    numerical_suffixes = {
+        1: 'st',
+        2: 'nd',
+        3: 'rd'
+    }
+    tenth = int(number) % 10
+    return numerical_suffixes.get(tenth, 'th')

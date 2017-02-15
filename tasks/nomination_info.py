@@ -31,20 +31,12 @@ def fetch_nomination(nomination_id_full, options={}):
     if nomination_id and congress:
         logging.info("\n[%s-%s] Fetching..." % (congress, nomination_id))
 
-        # fetch committee name map, if it doesn't already exist
-        nomination_type, number, congress = utils.split_nomination_id(nomination_id)
-        if not number:
-            return {'saved': False, 'ok': False, 'reason': "Couldn't parse %s" % nomination_id}
+        # Fetch bill details html
+        html = utils.download(
+                nomination_url_for(congress, nomination_id),
+                nomination_cache_for(congress, nomination_id, "details.html"), options)
 
-        if not utils.committee_names:
-            utils.fetch_committee_names(congress, options)
-
-        # fetch bill details body
-        body = utils.download(
-                nomination_url_for(nomination_id),
-                nomination_cache_for(nomination_id, "information.html"), options)
-
-        if not body:
+        if not html:
             return {'saved': False, 'ok': False, 'reason': "failed to download"}
 
         if options.get("download_only", False):
@@ -57,201 +49,59 @@ def fetch_nomination(nomination_id_full, options={}):
         # Also, the splitting process is nonsense:
         # http://thomas.loc.gov/home/PN/split.htm
         # http://web.archive.org/web/20141006022210/http://thomas.loc.gov/home/PN/split.htm
+        # TODO handle splits
+        #if "split into two or more parts" in html:
+            #return {'saved': False, 'ok': True, 'reason': 'was split'}
 
-        if "split into two or more parts" in body:
-            return {'saved': False, 'ok': True, 'reason': 'was split'}
-
-        nomination = parse_nomination(nomination_id, body, options)
+        nomination = parse_nomination(congress, nomination_id, html, options)
         output_nomination(nomination, options)
         return {'ok': True, 'saved': True}
     else:
         return {'saved': False, 'ok': False, 'reason': 'Both nomination_id and congress are required'}
 
-
-def parse_nomination(nomination_id, body, options):
-    nomination_type, number, congress = utils.split_nomination_id(nomination_id)
-
-    # remove (and store) comments, which contain some info for the nomination
-    # but also mess up the parser
-    facts = re.findall("<!--(.+?)-->", body)
-    body = re.sub("<!--.+?-->", "", body)
-
-    doc = fromstring(body)
-
-    # get rid of centered bold labels, they screw stuff up,
-    # e.g. agency names on PN1375-113
-    body = re.sub(re.compile("<div align=\"center\">.+?</div>", re.M), "", body)
-    for elem in doc.xpath('//div[@align="center"]'):
-        elem.getparent().remove(elem)
-
-    committee_names = []
-    committees = []
-
+def parse_nomination(congress, nomination_id, html, options):
     info = {
-            'nomination_id': nomination_id, 'actions': []
-            }
+        'congress': congress,
+        'nomination_id': nomination_id,
+        'actions': [],
+        'committee_names': [],
+        'committees': []
+    }
 
-    # the markup on these pages is a disaster, so we're going to use a heuristic based on boldface, inline tags followed by text
-    for pair in doc.xpath('//span[@class="elabel"]|//strong'):
-        if pair.tail:
-            text = pair.text or pair.text_content()
-            label, data = text.replace(':', '').strip(), pair.tail.strip()
+    doc = html.document_fromstring(page_html)
 
-            # handle actions separately
-            if label.split(" ")[-1] == "Action":
-                pieces = re.split("\s+\-\s+", data)
-
-                location = label.split(" ")[0].lower()
-
-                # use 'acted_at', even though it's always a date, to be consistent
-                # with acted_at field on bills and amendments
-                acted_at = datetime.strptime(pieces[0], "%B %d, %Y").strftime("%Y-%m-%d")
-
-                # join rest back together (in case action itself has a hyphen)
-                text = str.join(" - ", pieces[1:len(pieces)])
-
-                info['actions'].append({
-                    "type": "action",
-                    "location": location,
-                    "acted_at": acted_at,
-                    "text": text
-                    })
-
-            else:
-                # let's handle these cases one by one
-                if label == "Organization":
-                    info["organization"] = data
-
-                elif label == "Control Number":
-                    # this doesn't seem useful
-                    pass
-
-                elif label.lower() == "referred to":
-                    committee_names.append(data)
-
-                elif label == "Reported by":
-                    info["reported_by"] = data
-
-                elif label == "Nomination":
-                    # sanity check - verify nomination_id matches
-                    if nomination_id != data:
-                        raise Exception("Whoa! Mismatched nomination ID.")
-
-                elif label == "Date Received":
-                    # Note: Will break with the 1000th congress in year 3789
-                    match = re.search("(\d{2,3})[stndhr]{2}", data)
-                    if match:
-                        info["congress"] = int(match.group(1))
-                    else:
-                        raise Exception("Choked, couldn't find Congress in \"%s\"" % data)
-
-                    # Doc format is: "January 04, 1995 (104th Congress)"
-                    info["received_on"] = datetime.strptime(data.split(" (")[0], "%B %d, %Y").strftime("%Y-%m-%d")
-
-                elif label == "Nominee":
-
-                    # ignore any vice suffix
-                    name = data.split(", vice")[0]
-
-                    try:
-                        name = re.search("(.+?),", name).groups()[0]
-                    except Exception, e:
-                        raise Exception("Couldn't parse nominee entry: %s" % name)
-
-                    # Some begin "One nomination,...", so 'List of Nominees' will get it
-                    if "nomination" in name:
-                        pass
-
-                    # and grab the state and position out of the comment facts
-                    if facts[-5]:
-                        position = facts[-5]
-                    else:
-                        raise Exception("Couldn't find the position in the comments.")
-
-                    info["nominees"] = [{
-                        "name": name,
-                        "position": position,
-                        "state": facts[-6][2:]
-                        }]
-
-                elif label.lower() == "nominees":
-                    pass
-
-                elif label.lower() == "authority date":
-                    pass
-
-                elif label.lower() == "list of nominees":
-                    # step through each sibling, collecting each br's stripped tail for names as we go
-                    # stop when we get to a strong or span (next label)
-                    nominees = []
-
-                    current_position = None
-                    for sibling in pair.itersiblings():
-                        if sibling.tag == "br":
-                            if sibling.tail:
-                                name = sibling.tail.strip()
-                                if (name[0:5].lower() == "to be"):
-                                    current_position = name[6:].strip()
-                                elif name:
-                                    nominees.append({
-                                        "name": sibling.tail.strip(),
-                                        "position": current_position
-                                        })
-                        elif (sibling.tag == "strong") or (sibling.tag == "span"):
-                            break
-
-                    info["nominees"] = nominees
-
-                else:
-                    # choke, I think we handle all of them now
-                    raise Exception("Unrecognized label: %s" % label)
-
-    if not info.get("received_on", None):
-        raise Exception("Choked, couldn't find received date.")
-
-    if not info.get("nominees", None):
-        raise Exception("Choked, couldn't find nominee info.")
-
-    # try to normalize committee name to an ID
-    # choke if it doesn't work - the names should match up.
-    for committee_name in committee_names:
-        committee_id = utils.committee_names[committee_name]
-        committees.append(committee_id)
-    info["referred_to"] = committees
-    info["referred_to_names"] = committee_names
+    # TODO parse nomination details
 
     return info
 
-# directory helpers
+def output_for_nomination(congress, nomination_id, format):
+    # TODO what is format
+    # TODO what is data_dir() and should we be using it everywhere?
+    return "%s/%s/nominations/%s/%s" % (utils.data_dir(), congress, nomination_id, "data.%s" % format)
 
+def nomination_url_for(congress, nomination_id):
+    # nomination_id can be either of the form "63" or "64-01"
+    # Some example URLs:
+    # https://www.congress.gov/nomination/114th-congress/74
 
-def output_for_nomination(nomination_id, format):
-    nomination_type, number, congress = utils.split_nomination_id(nomination_id)
-    return "%s/%s/nominations/%s/%s" % (utils.data_dir(), congress, number, "data.%s" % format)
+    # TODO what is this
+    #number_pieces = number.split("-")
+    #if len(number_pieces) == 1:
+        #number_pieces.append("00")
+    #url_number = "%05d%s" % (int(number_pieces[0]), number_pieces[1])
 
+    suffix = utils.get_numerical_suffix(congress)
+    return "https://www.congress.gov/nomination/%s%s-congress/%s" % (congress, suffix, nomination_id)
 
-def nomination_url_for(nomination_id):
-    nomination_type, number, congress = utils.split_nomination_id(nomination_id)
-
-    # numbers can be either of the form "63" or "64-01"
-    number_pieces = number.split("-")
-    if len(number_pieces) == 1:
-        number_pieces.append("00")
-    url_number = "%05d%s" % (int(number_pieces[0]), number_pieces[1])
-
-    return "http://thomas.loc.gov/cgi-bin/ntquery/z?nomis:%03d%s%s:/" % (int(congress), nomination_type.upper(), url_number)
-
-
-def nomination_cache_for(nomination_id, file):
-    nomination_type, number, congress = utils.split_nomination_id(nomination_id)
-    return "%s/nominations/%s/%s" % (congress, number, file)
-
+def nomination_cache_for(congress, nomination_id, filename):
+    return "%s/nominations/%s/%s" % (congress, nomination_id, filename)
 
 def output_nomination(nomination, options):
     logging.info("[%s] Writing to disk..." % nomination['nomination_id'])
 
+    # TODO does this need to check for the format?
     # output JSON - so easy!
     utils.write(
             json.dumps(nomination, sort_keys=True, indent=2, default=utils.format_datetime),
-            output_for_nomination(nomination['nomination_id'], "json")
+            output_for_nomination(nomination['congress'], nomination['nomination_id'], "json")
             )
